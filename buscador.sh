@@ -111,49 +111,119 @@ print_table() {
   print_rule "$name_width" "$number_width" "$votes_width" "$pct_width" "$status_width"
 }
 
-election_for_cargo() {
-  case "$1" in
-    1) printf '%s' "$FEDERAL_ELECTION" ;;
-    3|5|6|7) printf '%s' "$STATE_ELECTION" ;;
-    *) die "cargo não suportado: $1" ;;
-  esac
+TURNO="${TSE_RESULTS_TURNO:-todos}"
+FEDERAL_ELECTION_1T="${TSE_RESULTS_FEDERAL_ELECTION_1T:-6257}"
+STATE_ELECTION_1T="${TSE_RESULTS_STATE_ELECTION_1T:-6259}"
+FEDERAL_ELECTION_2T="${TSE_RESULTS_FEDERAL_ELECTION_2T:-6258}"
+STATE_ELECTION_2T="${TSE_RESULTS_STATE_ELECTION_2T:-6260}"
+
+consultar_turno() {
+  local t="$1"
+  local fed_election state_election
+  local -a cargos_turno
+
+  if [[ "$t" == "1" ]]; then
+    fed_election="$FEDERAL_ELECTION_1T"
+    state_election="$STATE_ELECTION_1T"
+    cargos_turno=("${CARGOS[@]}")
+  elif [[ "$t" == "2" ]]; then
+    fed_election="$FEDERAL_ELECTION_2T"
+    state_election="$STATE_ELECTION_2T"
+    # No 2º turno, apenas cargos do executivo participam
+    cargos_turno=(3 1)
+  else
+    die "turno inválido: $t (use 1, 2 ou todos)"
+  fi
+
+  printf '\n'
+  if $use_color; then
+    printf '\033[1;34m======================================================================\033[0m\n'
+    printf '\033[1;37;44m                   RESULTADOS DO %sº TURNO - ANO %s                 \033[0m\n' "$t" "$YEAR"
+    printf '\033[1;34m======================================================================\033[0m\n'
+  else
+    printf '======================================================================\n'
+    printf '                   RESULTADOS DO %sº TURNO - ANO %s                 \n' "$t" "$YEAR"
+    printf '======================================================================\n'
+  fi
+
+  for cargo in "${cargos_turno[@]}"; do
+    local election
+    case "$cargo" in
+      1) election="$fed_election" ;;
+      3|5|6|7) election="$state_election" ;;
+      *) continue ;;
+    esac
+
+    local file="$tmp_dir/turno-$t-cargo-$cargo.json"
+    local cargo_padded election_padded
+    printf -v cargo_padded '%04d' "$cargo"
+    printf -v election_padded '%06d' "$election"
+    local url="$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}${MUNICIPIO}-c${cargo_padded}-e${election_padded}-u.json"
+
+    local http_code
+    http_code=$(curl --silent --show-error --location \
+      --write-out '%{http_code}' \
+      --retry 2 --connect-timeout 8 --max-time 25 \
+      --output "$file" "$url" 2>/dev/null || echo "000")
+
+    if [[ "$http_code" != "200" ]]; then
+      if [[ "$t" == "2" ]]; then
+        local desc_cargo="Cargo $cargo"
+        [[ "$cargo" == "3" ]] && desc_cargo="Governador"
+        [[ "$cargo" == "1" ]] && desc_cargo="Presidente"
+        printf '\n%s: Sem dados de 2º turno disponíveis para este município (HTTP %s).\n' "$desc_cargo" "$http_code"
+      else
+        printf '\nCargo %s: Consulta não retornou dados para este município (HTTP %s).\n' "$cargo" "$http_code"
+      fi
+      continue
+    fi
+
+    if ! jq -e '.carg | type == "array"' "$file" >/dev/null 2>&1; then
+      printf '\nCargo %s: Resposta retornou estrutura incompatível.\n' "$cargo"
+      continue
+    fi
+
+    local cargo_name
+    cargo_name="$(jq -r --arg cargo "$cargo" '.carg[] | select(.cd == $cargo) | .nmn' "$file" 2>/dev/null | head -n 1)"
+    [[ -z "$cargo_name" || "$cargo_name" == "null" ]] && cargo_name="Cargo $cargo"
+
+    printf '\n%s (cargo %s - %sº Turno)\n' "$cargo_name" "$cargo" "$t"
+    local rows_file="$tmp_dir/turno-$t-cargo-$cargo.tsv"
+    jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" '
+      [
+        .carg[] | select(.cd == $cargo)
+        | .. | objects | .cand? // empty | .[]
+        | select((.nmu // "") != "" and (.n // "") != "")
+        | {
+            nome: (.nmu | gsub("[[:cntrl:]]"; " ")),
+            numero: .n,
+            votos: ((.vap // "0") | tonumber),
+            pct: ((.pvap // "0,00") + "%"),
+            situacao: (if ((.st // "") | length) > 0 then .st else "-" end),
+            eleito: (.e // "n")
+          }
+      ]
+      | unique_by(.numero)
+      | sort_by([-.votos, (.nome | ascii_downcase), .numero])
+      | .[:$limit][]
+      | [.nome, .numero, (.votos | tostring), .pct, .situacao, .eleito] | @tsv
+    ' "$file" >"$rows_file"
+
+    mapfile -t rows <"$rows_file"
+    if (( ${#rows[@]} > 0 )); then
+      print_table rows
+    else
+      printf 'Nenhum candidato listado para este cargo.\n'
+    fi
+  done
 }
 
-for cargo in "${CARGOS[@]}"; do
-  election="$(election_for_cargo "$cargo")"
-  file="$tmp_dir/cargo-$cargo.json"
-  printf -v cargo_padded '%04d' "$cargo"
-  printf -v election_padded '%06d' "$election"
-  url="$BASE_URL/ele$YEAR/$election/dados/$UF/${UF}${MUNICIPIO}-c${cargo_padded}-e${election_padded}-u.json"
-
-  curl --fail --silent --show-error --location \
-    --retry 3 --retry-all-errors --connect-timeout 10 --max-time 30 \
-    --output "$file" "$url" || die "falha ao consultar o cargo $cargo"
-  jq -e '.carg | type == "array"' "$file" >/dev/null || die "resposta inválida para o cargo $cargo"
-
-  cargo_name="$(jq -r --arg cargo "$cargo" '.carg[] | select(.cd == $cargo) | .nmn' "$file" | head -n 1)"
-  [[ -n "$cargo_name" ]] || die "cargo $cargo ausente na resposta"
-  printf '\n%s (cargo %s)\n' "$cargo_name" "$cargo"
-  rows_file="$tmp_dir/cargo-$cargo.tsv"
-  jq -r --arg cargo "$cargo" --argjson limit "$LIMIT" '
-    [
-      .carg[] | select(.cd == $cargo)
-      | .. | objects | .cand? // empty | .[]
-      | select((.nmu // "") != "" and (.n // "") != "")
-      | {
-          nome: (.nmu | gsub("[[:cntrl:]]"; " ")),
-          numero: .n,
-          votos: ((.vap // "0") | tonumber),
-          pct: ((.pvap // "0,00") + "%"),
-          situacao: (if ((.st // "") | length) > 0 then .st else "-" end),
-          eleito: (.e // "n")
-        }
-    ]
-    | unique_by(.numero)
-    | sort_by([-.votos, (.nome | ascii_downcase), .numero])
-    | .[:$limit][]
-    | [.nome, .numero, (.votos | tostring), .pct, .situacao, .eleito] | @tsv
-  ' "$file" >"$rows_file"
-  mapfile -t rows <"$rows_file"
-  print_table rows
-done
+case "${TURNO,,}" in
+  1) consultar_turno 1 ;;
+  2) consultar_turno 2 ;;
+  todos|ambos|"")
+    consultar_turno 1
+    consultar_turno 2
+    ;;
+  *) die "Turno inválido: $TURNO (informe 1, 2 ou todos)" ;;
+esac
