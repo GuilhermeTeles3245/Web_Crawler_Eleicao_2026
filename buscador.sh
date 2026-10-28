@@ -33,38 +33,83 @@ if [[ "$COLOR_MODE" == always ]] || { [[ "$COLOR_MODE" == auto && -t 1 && "${TER
   use_color=true
 fi
 
+readonly name_header="NOME" number_header="NÚMERO" votes_header="VOTOS" pct_header="%" status_header="SITUAÇÃO"
+
 print_rule() {
-  local name_width="$1" number_width="$2" votes_width="$3"
-  printf '+-%*s-+-%*s-+-%*s-+\n' "$name_width" '' "$number_width" '' "$votes_width" '' | tr ' ' '-'
+  local name_width="$1" number_width="$2" votes_width="$3" pct_width="$4" status_width="$5"
+  printf '+-%*s-+-%*s-+-%*s-+-%*s-+-%*s-+\n' \
+    "$name_width" '' "$number_width" '' "$votes_width" '' "$pct_width" '' "$status_width" '' | tr ' ' '-'
 }
 
 print_table() {
   local -n table_rows="$1"
   local name_width=${#name_header} number_width=${#number_header} votes_width=${#votes_header}
-  local row name number votes
+  local pct_width=${#pct_header} status_width=${#status_header}
+  local row name number votes pct situacao eleito
+  local clean_status
 
   for row in "${table_rows[@]}"; do
-    IFS=$'\t' read -r name number votes <<<"$row"
+    row="${row%$'\r'}"
+    IFS=$'\t' read -r name number votes pct situacao eleito <<<"$row"
+    eleito="${eleito%$'\r'}"
+    clean_status="$situacao"
+    if [[ "$situacao" == *"2º turno"* || "$situacao" == *"2o turno"* ]]; then
+      clean_status="➜ 2º TURNO"
+    elif [[ "$eleito" == "s" || "$situacao" == "Eleito" ]]; then
+      if [[ "$situacao" != "-" && "$situacao" != "Eleito" ]]; then
+        clean_status="[ELEITO] $situacao"
+      else
+        clean_status="[ELEITO]"
+      fi
+    fi
     (( ${#name} > name_width )) && name_width=${#name}
     (( ${#number} > number_width )) && number_width=${#number}
     (( ${#votes} > votes_width )) && votes_width=${#votes}
+    (( ${#pct} > pct_width )) && pct_width=${#pct}
+    (( ${#clean_status} > status_width )) && status_width=${#clean_status}
   done
 
-  print_rule "$name_width" "$number_width" "$votes_width"
-  printf '| %-*s | %*s | %*s |\n' "$name_width" "$name_header" "$number_width" "$number_header" "$votes_width" "$votes_header"
-  print_rule "$name_width" "$number_width" "$votes_width"
+  print_rule "$name_width" "$number_width" "$votes_width" "$pct_width" "$status_width"
+  printf '| %-*s | %*s | %*s | %*s | %-*s |\n' \
+    "$name_width" "$name_header" "$number_width" "$number_header" "$votes_width" "$votes_header" "$pct_width" "$pct_header" "$status_width" "$status_header"
+  print_rule "$name_width" "$number_width" "$votes_width" "$pct_width" "$status_width"
+
   for row in "${table_rows[@]}"; do
-    IFS=$'\t' read -r name number votes <<<"$row"
+    row="${row%$'\r'}"
+    IFS=$'\t' read -r name number votes pct situacao eleito <<<"$row"
+    eleito="${eleito%$'\r'}"
+    clean_status="$situacao"
+    local is_eleito=false is_2t=false
+    if [[ "$situacao" == *"2º turno"* || "$situacao" == *"2o turno"* ]]; then
+      clean_status="➜ 2º TURNO"
+      is_2t=true
+    elif [[ "$eleito" == "s" || "$situacao" == "Eleito" ]]; then
+      if [[ "$situacao" != "-" && "$situacao" != "Eleito" ]]; then
+        clean_status="[ELEITO] $situacao"
+      else
+        clean_status="[ELEITO]"
+      fi
+      is_eleito=true
+    fi
+
     if $use_color; then
-      printf '| \033[36m%-*s\033[0m | %*s | \033[32m%*s\033[0m |\n' "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
+      if $is_eleito; then
+        printf '| \033[1;32m%-*s\033[0m | %*s | \033[1;32m%*s\033[0m | %*s | \033[1;32m%-*s\033[0m |\n' \
+          "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes" "$pct_width" "$pct" "$status_width" "$clean_status"
+      elif $is_2t; then
+        printf '| \033[1;33m%-*s\033[0m | %*s | \033[1;33m%*s\033[0m | %*s | \033[1;33m%-*s\033[0m |\n' \
+          "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes" "$pct_width" "$pct" "$status_width" "$clean_status"
+      else
+        printf '| \033[36m%-*s\033[0m | %*s | \033[32m%*s\033[0m | %*s | \033[90m%-*s\033[0m |\n' \
+          "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes" "$pct_width" "$pct" "$status_width" "$clean_status"
+      fi
     else
-      printf '| %-*s | %*s | %*s |\n' "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes"
+      printf '| %-*s | %*s | %*s | %*s | %-*s |\n' \
+        "$name_width" "$name" "$number_width" "$number" "$votes_width" "$votes" "$pct_width" "$pct" "$status_width" "$clean_status"
     fi
   done
-  print_rule "$name_width" "$number_width" "$votes_width"
+  print_rule "$name_width" "$number_width" "$votes_width" "$pct_width" "$status_width"
 }
-
-readonly name_header="NOME" number_header="NÚMERO" votes_header="VOTOS"
 
 election_for_cargo() {
   case "$1" in
@@ -95,12 +140,19 @@ for cargo in "${CARGOS[@]}"; do
       .carg[] | select(.cd == $cargo)
       | .. | objects | .cand? // empty | .[]
       | select((.nmu // "") != "" and (.n // "") != "")
-      | { nome: (.nmu | gsub("[[:cntrl:]]"; " ")), numero: .n, votos: ((.vap // "0") | tonumber) }
+      | {
+          nome: (.nmu | gsub("[[:cntrl:]]"; " ")),
+          numero: .n,
+          votos: ((.vap // "0") | tonumber),
+          pct: ((.pvap // "0,00") + "%"),
+          situacao: (if ((.st // "") | length) > 0 then .st else "-" end),
+          eleito: (.e // "n")
+        }
     ]
     | unique_by(.numero)
     | sort_by([-.votos, (.nome | ascii_downcase), .numero])
     | .[:$limit][]
-    | [.nome, .numero, (.votos | tostring)] | @tsv
+    | [.nome, .numero, (.votos | tostring), .pct, .situacao, .eleito] | @tsv
   ' "$file" >"$rows_file"
   mapfile -t rows <"$rows_file"
   print_table rows
